@@ -135,7 +135,7 @@ Quando o **Processo 1** encerrar sua sessão, o znode efêmero será apagado, li
 
 Além dos comandos básicos, os slides apresentam pontos importantes:
 
-### 🔑 Tipos de znodes
+###  Tipos de znodes
 - **Persistentes**: só desaparecem se deletados.  
 - **Efêmeros**: desaparecem quando a sessão do cliente acaba.  
 - **Sequenciais**: recebem um número incremental único, útil para **ordenação** e **eleição de líder**.  
@@ -149,7 +149,7 @@ Além dos comandos básicos, os slides apresentam pontos importantes:
 
 ---
 
-### 🧩 Receitas de coordenação
+###  Receitas de coordenação
 O ZooKeeper fornece a base para construir primitivas de coordenação, como:
 - **Locks distribuídos** (um processo por vez acessa recurso).  
 - **Barreiras** (processos esperam uns pelos outros antes de continuar).  
@@ -158,21 +158,21 @@ O ZooKeeper fornece a base para construir primitivas de coordenação, como:
 
 ---
 
-### ⚙️ Arquitetura
+###   Arquitetura
 - ZooKeeper roda como um **conjunto de servidores** (ensemble).  
 - Garante **tolerância a falhas** via protocolo **ZAB (ZooKeeper Atomic Broadcast)**.  
 - Funciona desde que haja **maioria (quórum)** disponível.  
 
 ---
 
-### 📌 Exemplo de eleição de líder
+###  Exemplo de eleição de líder
 - Cada processo cria um znode sequencial: `/lider/eleicao-XXXX`.  
 - O processo com o **menor número** é eleito líder.  
 - Se ele falhar, o próximo da fila assume.  
 
 ---
 
-### 🌍 Casos de uso reais
+###  Casos de uso reais
 - **Apache Kafka**: gerenciamento de líderes de partições.  
 - **Hadoop**: coordenação de NameNodes.  
 - **HBase**: manutenção de metadados consistentes.  
