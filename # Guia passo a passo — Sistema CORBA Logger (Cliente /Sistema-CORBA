@@ -1,0 +1,407 @@
+# Guia passo a passo — Sistema CORBA Logger (Cliente / Servidor)
+
+**Objetivo**
+
+Criar um sistema cliente/servidor usando CORBA (TAO) onde um servidor `Logger` mantém um registro de eventos recebidos por clientes espalhados na rede. O `Logger` expõe a operação `log(...)` e o atributo remoto `verbose` (leitura e escrita) que controla se o servidor imprime os eventos na tela.
+
+> Observação: todos os dados podem ser fictícios — o foco é a arquitetura CORBA, geração de stubs/skeletons, implementação do servant e do cliente, e teste com múltiplos clientes.
+
+---
+
+## 1. Pré-requisitos
+
+1. Linux (recomendo Ubuntu/Debian) ou outro *nix. Funciona em Windows, mas os comandos e paths mudam.
+2. GCC/G++ (c++11 ou posterior).
+3. ACE/TAO instalados (TAO deve incluir o `tao_idl`).
+4. Make (opcional, mas recomendado).
+5. Conhecimentos básicos de C++ e de linha de comando.
+
+> Se você não tem ACE/TAO instalado, instale via package manager (quando disponível) ou compile o ACE/TAO localmente. Ajuste `INCLUDE` e `LIB` no Makefile conforme seu `ACE_ROOT`/`TAO_ROOT`.
+
+---
+
+## 2. Estrutura de diretórios recomendada (para Github)
+
+```
+corba-logger/
+├─ idl/
+│  └─ Logger.idl
+├─ server/
+│  ├─ src/
+│  │  ├─ server.cpp
+│  │  ├─ Logger_i.cpp
+│  │  └─ Logger_i.h
+│  └─ Makefile
+├─ client/
+│  ├─ src/
+│  │  └─ client.cpp
+│  └─ Makefile
+├─ ior/         # pasta onde será escrita Logger.ior
+└─ README.md
+```
+
+---
+
+## 3. Definindo a interface IDL (`idl/Logger.idl`)
+
+Exemplo simples e autoexplicativo (em português para facilitar entendimento):
+
+```idl
+module LoggerApp {
+  enum Severity { DEBUG, WARNING, ERROR, CRITICAL };
+
+  interface Logger {
+    // atributo remoto — leitura e escrita
+    attribute boolean verbose;
+
+    // operação de log
+    void log(in Severity severidade,
+             in string endereco,
+             in unsigned short pid,
+             in unsigned long hora,
+             in string msg);
+  };
+};
+```
+
+**Comentários:**
+
+* `Severity` contém as 4 categorias pedidas.
+* `verbose` será acessível remotamente: o compilador IDL gera métodos `get`/`set` no stub/skeleton.
+* Tipos IDL usados: `unsigned short` (pid curto sem sinal), `unsigned long` (para segundos desde epoch), `string` e `boolean`.
+
+---
+
+## 4. Gerando stub e skeletons (com `tao_idl`)
+
+No diretório `idl/` rode:
+
+```bash
+cd idl
+tao_idl -Gstl -GI Logger.idl
+```
+
+Isso gera vários arquivos `.h` e `.cpp` (C++ mapping), por exemplo `LoggerC.cpp`, `LoggerS.cpp`, `LoggerC.h`, `LoggerS.h` e *outros*. Copie os arquivos gerados para os diretórios `server/src/` e `client/src/` conforme necessário (ou use paths relativos no Makefile).
+
+> Nota: as flags `-Gstl -GI` seguem seu enunciado. Se sua versão do TAO produzir nomes ou suffixos diferentes, adapte os nomes incluídos no `#include`.
+
+---
+
+## 5. Implementando o `Logger` (servant)
+
+Crie `server/src/Logger_i.h` e `server/src/Logger_i.cpp` implementando o servant. Abaixo um **exemplo** de implementação with thread-safety básica e armazenamento em memória (vetor).
+
+### `Logger_i.h`
+
+```cpp
+#ifndef LOGGER_I_H
+#define LOGGER_I_H
+
+#include "LoggerS.h"   // gerado pelo tao_idl
+#include <vector>
+#include <string>
+#include <mutex>
+
+class Logger_i : public POA_LoggerApp::Logger {
+public:
+    Logger_i();
+    virtual ~Logger_i();
+
+    // getters/setters do atributo (o nome exato pode variar conforme gerador)
+    virtual CORBA::Boolean verbose();
+    virtual void verbose(CORBA::Boolean v);
+
+    // operação de log
+    virtual void log(LoggerApp::Severity severidade,
+                     const char* endereco,
+                     CORBA::UShort pid,
+                     CORBA::ULong hora,
+                     const char* msg);
+
+private:
+    bool verbose_;
+    std::mutex mtx_;
+    std::vector<std::string> records_;
+};
+
+#endif // LOGGER_I_H
+```
+
+### `Logger_i.cpp`
+
+```cpp
+#include "Logger_i.h"
+#include <iostream>
+#include <sstream>
+#include <ctime>
+
+Logger_i::Logger_i() : verbose_(true) {}
+Logger_i::~Logger_i() {}
+
+CORBA::Boolean Logger_i::verbose() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return verbose_;
+}
+
+void Logger_i::verbose(CORBA::Boolean v) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    verbose_ = v;
+}
+
+void Logger_i::log(LoggerApp::Severity severidade,
+                   const char* endereco,
+                   CORBA::UShort pid,
+                   CORBA::ULong hora,
+                   const char* msg) {
+    std::lock_guard<std::mutex> lk(mtx_);
+
+    // montar linha legível
+    std::ostringstream oss;
+    // converte severidade para texto simples
+    const char* sev_str = "UNKNOWN";
+    switch (severidade) {
+        case LoggerApp::DEBUG: sev_str = "DEBUG"; break;
+        case LoggerApp::WARNING: sev_str = "WARNING"; break;
+        case LoggerApp::ERROR: sev_str = "ERROR"; break;
+        case LoggerApp::CRITICAL: sev_str = "CRITICAL"; break;
+    }
+
+    // opcional: converter hora (epoch) para formato legível
+    std::time_t t = static_cast<std::time_t>(hora);
+    char time_buf[64];
+    if (std::strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", std::gmtime(&t))) {
+        oss << "[" << time_buf << "] ";
+    } else {
+        oss << "[" << hora << "] ";
+    }
+
+    oss << "(" << sev_str << ") " << endereco << " pid=" << pid << " - " << msg;
+    std::string line = oss.str();
+
+    // armazenar em memória
+    records_.push_back(line);
+
+    // imprimir na tela somente quando verbose_ verdadeiro
+    if (verbose_) {
+        std::cout << line << std::endl;
+    }
+}
+```
+
+**Atenção:** os nomes exatos das funções relacionadas ao atributo `verbose` (getter/setter) podem variar de acordo com a versão do compilador IDL. Verifique os headers gerados (`LoggerS.h`, etc.) e ajuste os protótipos se necessário (ex.: `_get_verbose()`, `_set_verbose(...)`).
+
+---
+
+## 6. Arquivo `server.cpp` (inicialização do ORB e publicação da IOR)
+
+Exemplo simplificado de `server/src/server.cpp`:
+
+```cpp
+#include <tao/corba.h>
+#include <PortableServer.h>
+#include <iostream>
+#include <fstream>
+
+#include "LoggerS.h"     // gerado
+#include "Logger_i.h"
+
+int main(int argc, char* argv[]) {
+    try {
+        CORBA::ORB_var orb = CORBA::ORB_init(argc, argv);
+
+        CORBA::Object_var poa_obj = orb->resolve_initial_references("RootPOA");
+        PortableServer::POA_var root_poa = PortableServer::POA::_narrow(poa_obj);
+        PortableServer::POAManager_var mgr = root_poa->the_POAManager();
+        mgr->activate();
+
+        // criar o servant
+        Logger_i* my_logger = new Logger_i();
+
+        // ativar o servant no POA
+        PortableServer::ObjectId_var id = root_poa->activate_object(my_logger);
+        CORBA::Object_var ref = root_poa->id_to_reference(id);
+
+        // narrow para a interface Logger
+        LoggerApp::Logger_var logger = LoggerApp::Logger::_narrow(ref);
+
+        // gerar IOR e escrever em arquivo
+        CORBA::String_var ior = orb->object_to_string(ref);
+        std::ofstream ofs("../ior/Logger.ior");
+        ofs << ior.in();
+        ofs.close();
+
+        std::cout << "Logger pronto. IOR escrita em ../ior/Logger.ior" << std::endl;
+
+        orb->run();
+
+        // cleanup (nunca chega aqui enquanto orb->run estiver ativo)
+        root_poa->destroy(1, 1);
+        orb->destroy();
+    } catch (const CORBA::Exception& ex) {
+        ex._tao_print_exception("Exception in server");
+        return 1;
+    }
+    return 0;
+}
+```
+
+**Notas**:
+
+* Escrevemos a IOR em `../ior/Logger.ior` (ajuste o path conforme sua estrutura).
+* Não usamos Naming Service: os clientes obtêm a IOR lendo o arquivo.
+
+---
+
+## 7. Cliente `client/src/client.cpp` (exemplo de uso)
+
+O cliente faz três coisas básicas:
+
+1. Lê a IOR de `ior/Logger.ior`.
+2. Faz `string_to_object` e `_narrow` para `Logger`.
+3. Chama `verbose(...)` e `log(...)`.
+
+```cpp
+#include <tao/corba.h>
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <ctime>
+
+#include "LoggerC.h"   // gerado
+
+int main(int argc, char* argv[]) {
+    try {
+        CORBA::ORB_var orb = CORBA::ORB_init(argc, argv);
+
+        // ler IOR do arquivo
+        std::ifstream ifs("../ior/Logger.ior");
+        if (!ifs) {
+            std::cerr << "Arquivo IOR nao encontrado: ../ior/Logger.ior" << std::endl;
+            return 1;
+        }
+        std::string ior((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+        CORBA::Object_var obj = orb->string_to_object(ior.c_str());
+        LoggerApp::Logger_var logger = LoggerApp::Logger::_narrow(obj);
+        if (CORBA::is_nil(logger)) {
+            std::cerr << "Falha ao _narrow para Logger" << std::endl;
+            return 1;
+        }
+
+        // Alterar verbose no servidor (exemplo)
+        logger->verbose(true);
+
+        // Enviar um log
+        std::time_t now = std::time(nullptr);
+        logger->log(LoggerApp::ERROR, "192.168.0.10:4000", 1234, static_cast<CORBA::ULong>(now), "Mensagem de teste do cliente");
+
+        std::cout << "Log enviado com sucesso." << std::endl;
+
+        orb->destroy();
+    } catch (const CORBA::Exception& ex) {
+        ex._tao_print_exception("Exception in client");
+        return 1;
+    }
+    return 0;
+}
+```
+
+---
+
+## 8. Compilação — exemplos de comandos / Makefile
+
+Os comandos exatos dependem de onde ACE/TAO estão instalados. Abaixo um exemplo genérico de `Makefile` (serviço **muito** simplificado). Ajuste `INCLUDES` e `LIBS` para apontar para sua instalação do TAO/ACE.
+
+```makefile
+CXX = g++
+CXXFLAGS = -std=c++11 -I$(ACE_ROOT)/include -I.
+LDFLAGS = -L$(ACE_ROOT)/lib
+LIBS = -lACE -lTAO
+
+SRCS = server.cpp Logger_i.cpp LoggerS.cpp LoggerC.cpp
+OBJS = $(SRCS:.cpp=.o)
+
+server: $(OBJS)
+	$(CXX) $(CXXFLAGS) -o server $(OBJS) $(LDFLAGS) $(LIBS)
+
+clean:
+	rm -f *.o server
+```
+
+**Dica:** muitas instalações do TAO/ACE disponibilizam variáveis de ambiente (`ACE_ROOT`, `TAO_ROOT`) e instruções sobre quais bibliotecas linkar. Consulte a documentação local da sua instalação se obter erros de link.
+
+---
+
+## 9. Testando o sistema (passo a passo)
+
+1. Gere os stubs/skeletons com `tao_idl` (ver seção 4).
+2. Copie os arquivos gerados para `server/src` e `client/src`.
+3. Compile o servidor:
+
+   * `cd server/src` e `make` (ou compile manualmente).
+4. Crie a pasta `ior/` na raiz do projeto se ainda não existir.
+5. execute o servidor: `./server &` (ou em um terminal separado). O servidor imprimirá que a IOR foi escrita.
+6. Verifique `ior/Logger.ior` existe e contém a IOR.
+7. Compile o cliente e execute `./client`.
+8. Observe a saída do servidor (caso `verbose` esté ativado). Mude `verbose` pelo cliente chamando `logger->verbose(false)` e envie logs — eles não serão mais impressos, mas ainda estarão armazenados em memória no servant.
+9. Para testar múltiplos clientes, abra vários terminais e execute `./client` em cada um, ou rode um script:
+
+```bash
+for i in {1..5}; do ./client & done
+```
+
+---
+
+## 10. Verificação e validação
+
+* **Severidade e formatação:** verifique se o texto impresso contém data/hora legível, severidade, endereço e msg.
+* **Controle remoto de `verbose`:** ao chamar `logger->verbose(false)` de um cliente, novas mensagens não devem ser exibidas no stdout do servidor.
+* **Múltiplos clientes:** o servidor deve aceitar chamadas concorrentes (por isso o uso de `std::mutex` no exemplo).
+
+---
+
+## 11. Erros comuns e como resolver
+
+* **Arquivo `Logger.ior` não encontrado:** certifique-se que o servidor foi executado e criou a IOR no path correto.
+* **`_narrow` retorna `nil`:** IOR inválida ou mismatch entre as versões dos stubs gerados e o cliente.
+* **Erros de link (`undefined reference`)**: verifique se as bibliotecas TAO/ACE estão sendo linkadas e se os paths de include estão corretos.
+* **Nomes de funções geradas diferentes:** verifique os headers gerados (`LoggerS.h`, `LoggerC.h`) para o nome exato dos métodos do atributo `verbose` (p.ex. `_get_verbose`/`_set_verbose` vs `verbose()`/`verbose(...)`) e ajuste sua implementação do servant.
+
+---
+
+## 12. Organização do repositório no GitHub
+
+* Inclua `README.md` com instruções resumidas (comandos principais para gerar IDL, compilar e executar).
+* Inclua `Makefile` para `server/` e `client/` para facilitar a reprodução.
+* Coloque `idl/Logger.idl` em destaque e os passos para rodar `tao_idl`.
+* Coloque scripts de teste (ex.: `scripts/run-multiple-clients.sh`).
+
+---
+
+## 13. Exemplo de fluxo de uso (resumo rápido)
+
+1. `cd idl && tao_idl -Gstl -GI Logger.idl`
+2. Copiar arquivos gerados para `server/src` e `client/src`
+3. `cd server/src && make && ./server &`
+4. `cd client/src && make && ./client`
+5. Alterar `verbose` via cliente e enviar mensagens adicionais.
+
+---
+
+## 14. Próximos passos / melhorias sugeridas
+
+* Persistir o histórico (`records_`) em disco (JSON/CSV) em vez de apenas memória.
+* Implementar rotação de logs e limites de armazenamento.
+* Adicionar autenticação/assinatura nas chamadas (se necessário).
+* Implementar uma operação `getLogs()` para recuperar registros remotamente (cuidado com o tamanho dos dados — usar paginação).
+* Usar o Naming Service do CORBA para publicar a referência, caso queira remover o passo de compartilhar IOR por arquivo.
+
+---
+
+Se quiser, eu também posso:
+
+* Gerar um `README.md` já formatado para colocar direto no GitHub (com os comandos prontos);
+* Gerar `Makefile`s mais completos para `server/` e `client/`;
+* Gerar os arquivos `server.cpp`, `client.cpp`, `Logger_i.h` e `Logger_i.cpp` prontos (com base no que deixei de exemplo), prontos para commit.
+
+Diga qual desses extras você quer que eu crie em seguida e eu gero aqui no repositório do canvas para você baixar.
