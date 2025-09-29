@@ -387,21 +387,3 @@ for i in {1..5}; do ./client & done
 5. Alterar `verbose` via cliente e enviar mensagens adicionais.
 
 ---
-
-## 14. Próximos passos / melhorias sugeridas
-
-* Persistir o histórico (`records_`) em disco (JSON/CSV) em vez de apenas memória.
-* Implementar rotação de logs e limites de armazenamento.
-* Adicionar autenticação/assinatura nas chamadas (se necessário).
-* Implementar uma operação `getLogs()` para recuperar registros remotamente (cuidado com o tamanho dos dados — usar paginação).
-* Usar o Naming Service do CORBA para publicar a referência, caso queira remover o passo de compartilhar IOR por arquivo.
-
----
-
-Se quiser, eu também posso:
-
-* Gerar um `README.md` já formatado para colocar direto no GitHub (com os comandos prontos);
-* Gerar `Makefile`s mais completos para `server/` e `client/`;
-* Gerar os arquivos `server.cpp`, `client.cpp`, `Logger_i.h` e `Logger_i.cpp` prontos (com base no que deixei de exemplo), prontos para commit.
-
-Diga qual desses extras você quer que eu crie em seguida e eu gero aqui no repositório do canvas para você baixar.
